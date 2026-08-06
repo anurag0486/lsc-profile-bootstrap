@@ -1,0 +1,8 @@
+{
+  "python.defaultInterpreterPath": "python3",
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true
+  },
+  "terminal.integrated.cwd": "${workspaceFolder}"
+}

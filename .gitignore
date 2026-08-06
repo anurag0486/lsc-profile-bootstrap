@@ -1,0 +1,8 @@
+packages/*
+!packages/.gitkeep
+config/bootstrap.env
+.lsc-retrieve-*
+__pycache__/
+*.pyc
+.DS_Store
+.env

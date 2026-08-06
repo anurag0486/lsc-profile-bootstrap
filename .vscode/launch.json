@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "LSC Profile Bootstrap",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/lsc_profile_bootstrap.py",
+      "console": "integratedTerminal",
+      "args": [
+        "GOLDEN_ORG",
+        "MY_DEV_ORG",
+        "Custom: FSR POC",
+        "Medical Science Liaison"
+      ],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

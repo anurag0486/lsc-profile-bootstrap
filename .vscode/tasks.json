@@ -1,0 +1,74 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "sourceOrg",
+      "type": "promptString",
+      "description": "Source org alias (golden profile org)",
+      "default": "GOLDEN_ORG"
+    },
+    {
+      "id": "destOrg",
+      "type": "promptString",
+      "description": "Destination org alias (your dev org)",
+      "default": "MY_DEV_ORG"
+    },
+    {
+      "id": "sourceProfileApi",
+      "type": "promptString",
+      "description": "Source profile API name (e.g. Custom: FSR POC)",
+      "default": "Custom: FSR POC"
+    },
+    {
+      "id": "targetProfileName",
+      "type": "promptString",
+      "description": "Target profile display Name (Setup label)",
+      "default": "Medical Science Liaison"
+    }
+  ],
+  "tasks": [
+    {
+      "label": "LSC: Login to Source Org",
+      "type": "shell",
+      "command": "sf org login web --alias ${input:sourceOrg}",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "LSC: Login to Dev Org",
+      "type": "shell",
+      "command": "sf org login web --alias ${input:destOrg}",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "LSC: List Connected Orgs",
+      "type": "shell",
+      "command": "sf org list",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "LSC: List Profile API Names (Source Org)",
+      "type": "shell",
+      "command": "sf org list metadata --metadata-type Profile --target-org ${input:sourceOrg}",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "LSC: Run Profile Bootstrap (deploy)",
+      "type": "shell",
+      "command": "python3 lsc_profile_bootstrap.py \"${input:sourceOrg}\" \"${input:destOrg}\" \"${input:sourceProfileApi}\" \"${input:targetProfileName}\"",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "group": { "kind": "build", "isDefault": true }
+    },
+    {
+      "label": "LSC: Run Profile Bootstrap (package only)",
+      "type": "shell",
+      "command": "python3 lsc_profile_bootstrap.py \"${input:sourceOrg}\" \"${input:destOrg}\" \"${input:sourceProfileApi}\" \"${input:targetProfileName}\" --package-only",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    }
+  ]
+}

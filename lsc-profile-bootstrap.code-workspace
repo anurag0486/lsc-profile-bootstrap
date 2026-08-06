@@ -1,0 +1,19 @@
+{
+  "folders": [
+    {
+      "name": "LSC Profile Bootstrap",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "python.defaultInterpreterPath": "python3",
+    "terminal.integrated.cwd": "${workspaceFolder}"
+  },
+  "extensions": {
+    "recommendations": [
+      "salesforce.salesforcedx-vscode",
+      "salesforce.salesforcedx-vscode-core",
+      "ms-python.python"
+    ]
+  }
+}
