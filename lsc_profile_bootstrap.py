@@ -25,7 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
+import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -37,6 +37,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 NS = "http://soap.sforce.com/2006/04/metadata"
 ET.register_namespace("", NS)
 TOTAL_STEPS = 9
+WORK_DIR = SCRIPT_DIR / ".lsc-work"
 
 # Standard Salesforce profiles (partial list); anything else is treated as custom for metadata API names.
 STANDARD_PROFILES = {
@@ -271,6 +272,78 @@ def profile_metadata_selector_from_api(api_name: str) -> str:
     return f"Profile:{quote(normalize_profile_api_name(api_name), safe='')}"
 
 
+LIFESCI_META_SUFFIX = ".lifeSciConfigRecord-meta.xml"
+
+
+def find_lifesci_config_dir(root: Path) -> Optional[Path]:
+    for candidate in (
+        root / "lifeSciConfigRecords",
+        root / "force-app" / "main" / "default" / "lifeSciConfigRecords",
+    ):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def lifesci_config_paths(config_dir: Path) -> list[Path]:
+    return sorted(config_dir.glob(f"*{LIFESCI_META_SUFFIX}"))
+
+
+def lifesci_member_name(path: Path) -> str:
+    name = path.name
+    if name.endswith(LIFESCI_META_SUFFIX):
+        return name[: -len(LIFESCI_META_SUFFIX)]
+    if name.endswith(".lifeSciConfigRecord"):
+        return name[: -len(".lifeSciConfigRecord")]
+    return path.stem
+
+
+def lifesci_base_name(filename: str) -> str:
+    for suffix in (LIFESCI_META_SUFFIX, ".lifeSciConfigRecord"):
+        if filename.endswith(suffix):
+            return filename[: -len(suffix)]
+    return filename.split(".", 1)[0]
+
+
+def is_target_profile_config(filename: str, target_profile: str, target_custom: bool) -> bool:
+    base = lifesci_base_name(filename)
+    if target_custom:
+        return f"-Custom-{target_profile}" in base
+    return base.endswith(f"-{target_profile}") or f"-{target_profile}-" in base
+
+
+def dbschema_has_profile_assignment(path: Path, target_token: str) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return bool(re.search(rf"<assignedTo>\s*{re.escape(target_token)}\s*</assignedTo>", text))
+
+
+def prune_configs_for_target_only(
+    config_dir: Path,
+    target_profile: str,
+    target_custom: bool,
+) -> dict[str, int]:
+    """Keep only target-profile admin settings and DbSchema with target profile assigned."""
+    target_token = profile_assignment_token(target_profile, target_custom)
+    stats = {"removed": 0, "kept_admin": 0, "kept_dbschema": 0}
+    for path in list(lifesci_config_paths(config_dir)):
+        base = lifesci_base_name(path.name)
+        keep = False
+        if is_dbschema_member(base):
+            if dbschema_has_profile_assignment(path, target_token):
+                keep = True
+                stats["kept_dbschema"] += 1
+        elif is_target_profile_config(path.name, target_profile, target_custom):
+            keep = True
+            stats["kept_admin"] += 1
+        if not keep:
+            path.unlink()
+            stats["removed"] += 1
+    return stats
+
+
 def is_dbschema_member(name: str) -> bool:
     return name.startswith("DbSchema_") or name.startswith("DBSchema_")
 
@@ -315,6 +388,14 @@ def count_profile_xml_sections(profile_file: Path) -> dict[str, int]:
     for tag in merge_tags:
         counts[tag] = sum(1 for elem in root.iter() if strip_ns(elem.tag) == tag)
     return counts
+
+
+def project_temp_dir(prefix: str) -> Path:
+    """Create a temp directory inside the Salesforce project (sf CLI requirement)."""
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    path = WORK_DIR / f"{prefix}{uuid.uuid4().hex[:8]}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def retrieve_metadata(org: str, metadata_items: list[str], output_dir: Path) -> None:
@@ -431,11 +512,12 @@ def profile_assignment_token(profile_name: str, custom: bool) -> str:
 
 
 def is_profile_specific_config(filename: str, source_profile: str, source_profile_id: Optional[str]) -> bool:
-    if f"-Custom-{source_profile}" in filename or f"_{source_profile}" in filename:
+    base = lifesci_base_name(filename)
+    if f"-Custom-{source_profile}" in base or f"_{source_profile}" in base:
         return True
-    if f"-{source_profile}." in filename or filename.endswith(f"-{source_profile}.lifeSciConfigRecord"):
+    if base.endswith(f"-{source_profile}") or base.endswith(f"_{source_profile}"):
         return True
-    if source_profile_id and source_profile_id in filename:
+    if source_profile_id and source_profile_id in base:
         return True
     return False
 
@@ -449,28 +531,29 @@ def target_config_filename(
     target_custom: bool,
 ) -> Optional[str]:
     """Return new filename for a profile-specific config, or None if not profile-specific."""
-    new_name = filename
+    base = lifesci_base_name(filename)
+    new_base = base
     replaced = False
 
-    if f"-Custom-{source_profile}" in filename:
+    if f"-Custom-{source_profile}" in base:
         repl = f"-Custom-{target_profile}" if target_custom else f"-{target_profile}"
-        new_name = filename.replace(f"-Custom-{source_profile}", repl, 1)
+        new_base = base.replace(f"-Custom-{source_profile}", repl, 1)
         replaced = True
-    elif f"-{source_profile}." in filename:
-        repl = f"-Custom-{target_profile}." if target_custom else f"-{target_profile}."
-        new_name = filename.replace(f"-{source_profile}.", repl, 1)
+    elif base.endswith(f"-{source_profile}"):
+        repl = f"-Custom-{target_profile}" if target_custom else f"-{target_profile}"
+        new_base = base[: -len(source_profile)] + target_profile
+        if target_custom and f"-Custom-{target_profile}" not in new_base:
+            new_base = base.replace(f"-{source_profile}", repl, 1)
         replaced = True
-    elif source_profile_id and source_profile_id in filename:
-        # Prefer profile-name based metadata naming for deploy (works before target profile id exists)
-        base = filename.split(".")[0]
-        category = base.split("_")[0] if "_" in base else base.split("-")[0]
-        suffix = "-Custom-" if target_custom else "-"
-        new_name = f"{category}{suffix}{target_profile}.lifeSciConfigRecord"
+    elif source_profile_id and source_profile_id in base:
+        prefix = base.replace(source_profile_id, "").rstrip("_-")
+        suffix = f"-Custom-{target_profile}" if target_custom else f"-{target_profile}"
+        new_base = f"{prefix}{suffix}"
         replaced = True
 
     if not replaced:
         return None
-    return new_name
+    return f"{new_base}{LIFESCI_META_SUFFIX}"
 
 
 def clone_lifesci_config_records(
@@ -494,9 +577,9 @@ def clone_lifesci_config_records(
 
     target_token = profile_assignment_token(target_profile, target_custom)
 
-    for path in list(config_dir.glob("*.lifeSciConfigRecord")):
+    for path in list(lifesci_config_paths(config_dir)):
         name = path.name
-        if is_dbschema_member(name):
+        if is_dbschema_member(lifesci_base_name(name)):
             continue
         if not is_profile_specific_config(name, source_profile, source_profile_id):
             stats["skipped"] += 1
@@ -517,8 +600,8 @@ def clone_lifesci_config_records(
         RUN.cloned_admin_settings.append(new_name)
         step_detail(f"Admin Console setting cloned: {name} → {new_name}")
 
-    for path in config_dir.glob("*.lifeSciConfigRecord"):
-        if not is_dbschema_member(path.name):
+    for path in lifesci_config_paths(config_dir):
+        if not is_dbschema_member(lifesci_base_name(path.name)):
             continue
         if add_dbschema_assignment(path, target_token):
             stats["dbschema_updated"] += 1
@@ -621,14 +704,64 @@ def clone_lifesci_metadata_records(
     return stats
 
 
-def deploy_package(package_dir: Path, dest_org: str) -> None:
+@dataclass(frozen=True)
+class PackageLayout:
+    """Run output folders: source = retrieved golden org snapshot; target = deploy package."""
+
+    root: Path
+
+    @property
+    def source_root(self) -> Path:
+        return self.root / "source"
+
+    @property
+    def target_root(self) -> Path:
+        return self.root / "target"
+
+    @property
+    def source_profiles(self) -> Path:
+        return self.source_root / "force-app" / "main" / "default" / "profiles"
+
+    @property
+    def source_configs(self) -> Path:
+        return self.source_root / "force-app" / "main" / "default" / "lifeSciConfigRecords"
+
+    @property
+    def target_profiles(self) -> Path:
+        return self.target_root / "force-app" / "main" / "default" / "profiles"
+
+    @property
+    def target_configs(self) -> Path:
+        return self.target_root / "force-app" / "main" / "default" / "lifeSciConfigRecords"
+
+    def ensure_dirs(self) -> None:
+        for path in (
+            self.source_profiles,
+            self.source_configs,
+            self.target_profiles,
+            self.target_configs,
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+        shutil.copy(SCRIPT_DIR / "sfdx-project.json", self.target_root / "sfdx-project.json")
+
+
+def copy_lifesci_dir(src_dir: Path, dest_dir: Path) -> int:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for path in lifesci_config_paths(src_dir):
+        shutil.copy2(path, dest_dir / path.name)
+        copied += 1
+    return copied
+
+
+def deploy_package(layout: PackageLayout, dest_org: str) -> None:
     run_sf(
         [
             "project",
             "deploy",
             "start",
             "--source-dir",
-            str(package_dir / "force-app"),
+            str(layout.target_root / "force-app"),
             "--target-org",
             dest_org,
             "--wait",
@@ -647,7 +780,7 @@ def print_execution_summary(
     source_analysis: dict[str, Any],
     lifesci_stats: dict[str, Any],
     profile_counts: dict[str, int],
-    package_root: Path,
+    layout: PackageLayout,
     deployed: bool,
 ) -> None:
     admin_generated = lifesci_stats.get("cloned", 0)
@@ -662,7 +795,9 @@ def print_execution_summary(
     log(f"  Source profile Name:     {source.name}")
     log(f"  Target profile Name:     {target_profile_name}")
     log(f"  Profile action:          {'CREATED (cloned)' if profile_created else 'UPDATED (merged assignments)'}")
-    log(f"  Package path:            {package_root}")
+    log(f"  Run output folder:       {layout.root}")
+    log(f"  Retrieved (retained):    {layout.source_root}")
+    log(f"  Deploy package:          {layout.target_root}")
     log(f"  Deployed to dest org:    {'Yes' if deployed else 'No (package-only)'}")
     log("")
     log("  --- Retrieved from source org ---")
@@ -677,6 +812,16 @@ def print_execution_summary(
     log("  --- Generated for target profile ---")
     log(f"  Admin Console settings generated:       {admin_generated}")
     log(f"  DbSchema profiles assignments added:    {dbschema_generated}")
+    prune = lifesci_stats.get("package_prune")
+    if prune:
+        log(
+            f"  Unrelated configs excluded from deploy: "
+            f"{prune.get('removed', 0)} (org-level / other profiles not touched)"
+        )
+        log(
+            f"  Deploy package contains:                "
+            f"{prune.get('kept_admin', 0)} admin + {prune.get('kept_dbschema', 0)} DbSchema"
+        )
     log("")
     log("  --- Profile assignments copied ---")
     log(f"  Page layout assignments:                {profile_counts.get('layoutAssignments', 0)}")
@@ -698,18 +843,26 @@ def print_execution_summary(
     log("")
 
 
-def write_readme(
-    out_dir: Path,
+def write_package_readmes(
+    layout: PackageLayout,
     source_org: str,
     dest_org: str,
     source_profile: str,
     target_profile: str,
     profile_created: bool,
     stats: dict,
+    source_manifest_items: list[str],
+    target_manifest_items: list[str],
 ) -> None:
-    readme = f"""# LSC Profile Bootstrap Package
+    generated = datetime.now(timezone.utc).isoformat()
+    source_profile_count = len(list(layout.source_profiles.glob("*.profile-meta.xml")))
+    source_config_count = len(lifesci_config_paths(layout.source_configs))
+    target_profile_count = len(list(layout.target_profiles.glob("*.profile-meta.xml")))
+    target_config_count = len(lifesci_config_paths(layout.target_configs))
 
-Generated: {datetime.now(timezone.utc).isoformat()}
+    root_readme = f"""# LSC Profile Bootstrap Run
+
+Generated: {generated}
 
 | Parameter | Value |
 |-----------|-------|
@@ -719,27 +872,74 @@ Generated: {datetime.now(timezone.utc).isoformat()}
 | Target profile | `{target_profile}` |
 | Profile created | `{profile_created}` |
 
-## Contents
-- `force-app/main/default/profiles/` — profile definition (if cloned) or merged assignments
-- `force-app/main/default/lifeSciConfigRecords/` — Admin Console + DbSchema settings
+## Folder structure
+
+```
+{layout.root.name}/
+├── source/     ← Retrieved from golden org (retained for review; not deployed)
+└── target/     ← Deploy package only (what goes to `{dest_org}`)
+```
+
+## Deploy
+```bash
+sf project deploy start --source-dir target/force-app --target-org {dest_org} --wait 30
+```
+
+See `source/README.md` and `target/README-DEPLOY.md` for details.
+"""
+    (layout.root / "README.md").write_text(root_readme, encoding="utf-8")
+
+    source_readme = f"""# Source — Retrieved from `{source_org}`
+
+Golden profile snapshot retained for review. **This folder is not deployed.**
+
+| Path | Description |
+|------|-------------|
+| `force-app/main/default/profiles/` | Source profile as retrieved ({source_profile_count} file(s)) |
+| `force-app/main/default/lifeSciConfigRecords/` | Source-profile admin + DbSchema as retrieved ({source_config_count} file(s)) |
+| `manifest-retrieved.xml` | Metadata members retrieved from source org |
+
+## Stats
+```json
+{json.dumps(stats.get("source_analysis", {}), indent=2)}
+```
+"""
+    (layout.source_root / "README.md").write_text(source_readme, encoding="utf-8")
+    (layout.source_root / "manifest-retrieved.xml").write_text(
+        build_package_xml(source_manifest_items), encoding="utf-8"
+    )
+
+    target_readme = f"""# Target — Deploy to `{dest_org}`
+
+Contains **only** metadata for profile `{target_profile}`. Deploy this folder.
+
+| Path | Description |
+|------|-------------|
+| `force-app/main/default/profiles/` | Target profile ({target_profile_count} file(s)) |
+| `force-app/main/default/lifeSciConfigRecords/` | Target-profile admin + DbSchema ({target_config_count} file(s)) |
+| `manifest.xml` | Deploy manifest ({len(target_manifest_items)} members) |
+
+## Deploy
+```bash
+sf project deploy start --source-dir force-app --target-org {dest_org} --wait 30
+```
+
+## Deploy scope
+Org-level settings and other profiles' configs are **not** included.
+Omitting metadata from a deploy does **not** delete existing settings in the destination org.
 
 ## Stats
 ```json
 {json.dumps(stats, indent=2)}
 ```
 
-## Deploy manually
-```bash
-sf project deploy start --source-dir force-app --target-org {dest_org} --wait 30
-```
-
-## Post-deploy (required)
+## Post-deploy
 1. Admin Console → Mobile → Object Metadata Cache → **Validate**
 2. **Generate Metadata Cache** for `{target_profile}`
 3. Assign LSC permission sets to test users
 4. iPad sync smoke test
 """
-    (out_dir / "README-PACKAGE.md").write_text(readme, encoding="utf-8")
+    (layout.target_root / "README-DEPLOY.md").write_text(target_readme, encoding="utf-8")
 
 
 def main() -> int:
@@ -798,17 +998,11 @@ def main() -> int:
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if args.output_dir:
-        package_root = Path(args.output_dir).resolve()
+        run_root = Path(args.output_dir).resolve()
     else:
-        package_root = (SCRIPT_DIR / "packages" / f"lsc-bootstrap-{timestamp}").resolve()
-    package_root.mkdir(parents=True, exist_ok=True)
-    retrieve_root = Path(tempfile.mkdtemp(prefix="lsc-retrieve-"))
-    force_app = package_root / "force-app" / "main" / "default"
-    profiles_out = force_app / "profiles"
-    configs_out = force_app / "lifeSciConfigRecords"
-    profiles_out.mkdir(parents=True, exist_ok=True)
-    configs_out.mkdir(parents=True, exist_ok=True)
-    shutil.copy(SCRIPT_DIR / "sfdx-project.json", package_root / "sfdx-project.json")
+        run_root = (SCRIPT_DIR / "packages" / f"lsc-bootstrap-{timestamp}").resolve()
+    layout = PackageLayout(run_root)
+    layout.ensure_dirs()
 
     stats: dict = {}
     profile_created = False
@@ -819,48 +1013,60 @@ def main() -> int:
     target_profile_id: Optional[str] = None
     lifesci_stats: dict[str, Any] = {}
     deployed = False
+    source_manifest_items: list[str] = []
+    target_manifest_items: list[str] = []
 
     try:
         step_header(5, "Retrieve source profile (layouts, apps, tabs, record pages)")
         profile_selector = profile_metadata_selector_from_api(source.api_name)
         step_detail(f"Metadata selector: {profile_selector}")
-        retrieve_metadata(source_org, [profile_selector], retrieve_root)
-        source_profile_file = find_profile_file(retrieve_root, source)
-        if not source_profile_file:
-            raise RuntimeError(
-                f"Could not retrieve Profile API '{source.api_name}' from {source_org}. "
-                f"Check permissions."
-            )
-        step_ok(f"Retrieved profile file: {source_profile_file.name}")
+        profile_tmp = project_temp_dir("retrieve-profile-")
+        try:
+            retrieve_metadata(source_org, [profile_selector], profile_tmp)
+            source_profile_file = find_profile_file(profile_tmp, source)
+            if not source_profile_file:
+                raise RuntimeError(
+                    f"Could not retrieve Profile API '{source.api_name}' from {source_org}. "
+                    f"Check permissions."
+                )
+            source_profile_dest = layout.source_profiles / source_profile_file.name
+            shutil.copy2(source_profile_file, source_profile_dest)
+            source_manifest_items.append(f"Profile:{source.api_name}")
+            step_ok(f"Retrieved profile → source/{source_profile_dest.relative_to(layout.root)}")
+        finally:
+            shutil.rmtree(profile_tmp, ignore_errors=True)
 
         step_header(6, "Build target profile package")
         if not target_exists:
             target_custom = True
             dest_profile = rename_profile_file(
-                source_profile_file, profiles_out, target_profile_name, target_custom
+                source_profile_dest, layout.target_profiles, target_profile_name, target_custom
             )
-            step_ok(f"Cloned profile → {dest_profile.name} (display Name: {target_profile_name})")
+            step_ok(
+                f"Cloned profile → target/{dest_profile.relative_to(layout.root)} "
+                f"(display Name: {target_profile_name})"
+            )
             profile_created = True
             target_profile_id = None
         else:
             target_custom = target.custom
             target_profile_id = target.id
-            tmp = Path(tempfile.mkdtemp(prefix="lsc-tgt-profile-"))
+            tmp = project_temp_dir("tgt-profile-")
             try:
                 tgt_selector = profile_metadata_selector_from_api(target.api_name)
                 step_detail(f"Retrieving existing target profile: {tgt_selector}")
                 retrieve_metadata(dest_org, [tgt_selector], tmp)
                 target_profile_file = find_profile_file(tmp, target)
                 if target_profile_file:
-                    dest_profile = profiles_out / target_profile_file.name
-                    merge_profile_sections(source_profile_file, target_profile_file, dest_profile)
-                    step_ok(f"Merged layout/app/tab assignments into: {dest_profile.name}")
+                    dest_profile = layout.target_profiles / target_profile_file.name
+                    merge_profile_sections(source_profile_dest, target_profile_file, dest_profile)
+                    step_ok(f"Merged assignments → target/{dest_profile.relative_to(layout.root)}")
                 else:
                     step_detail("Could not retrieve target profile for merge — copying source profile file")
                     dest_profile = rename_profile_file(
-                        source_profile_file, profiles_out, target_profile_name, target_custom
+                        source_profile_dest, layout.target_profiles, target_profile_name, target_custom
                     )
-                    step_ok(f"Wrote profile file: {dest_profile.name}")
+                    step_ok(f"Wrote profile → target/{dest_profile.relative_to(layout.root)}")
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
 
@@ -873,7 +1079,7 @@ def main() -> int:
             )
 
         step_header(7, "Retrieve LifeSciConfigRecord from source org (Admin Console + DbSchema)")
-        lifesci_tmp = Path(tempfile.mkdtemp(prefix="lsc-lifesci-"))
+        lifesci_tmp = project_temp_dir("lifesci-")
         members: list[str] = []
         try:
             list_result = sf_json(
@@ -890,27 +1096,37 @@ def main() -> int:
                 f"{source_analysis.get('source_profile_admin_count', 0)}"
             )
             if members:
+                profile_admin_members = source_analysis.get("source_profile_admin_names", [])
+                dbschema_members = [m for m in members if is_dbschema_member(m)]
+                retrieve_members = profile_admin_members + dbschema_members
+                step_detail(
+                    f"Retrieving {len(profile_admin_members)} source-profile admin settings + "
+                    f"{len(dbschema_members)} DbSchema configs "
+                    f"(skipping org-level and other-profile admin settings)"
+                )
                 chunk_size = 200
-                for i in range(0, len(members), chunk_size):
-                    chunk = members[i : i + chunk_size]
+                for i in range(0, len(retrieve_members), chunk_size):
+                    chunk = retrieve_members[i : i + chunk_size]
                     items = [f"LifeSciConfigRecord:{m}" for m in chunk]
                     step_detail(f"Retrieving LifeSciConfigRecord batch {i // chunk_size + 1} ({len(chunk)} items)")
                     retrieve_metadata(source_org, items, lifesci_tmp)
-                src_configs = lifesci_tmp / "force-app" / "main" / "default" / "lifeSciConfigRecords"
-                if not src_configs.exists():
-                    src_configs = lifesci_tmp / "lifeSciConfigRecords"
-                if src_configs.exists():
-                    copied = 0
-                    for f in src_configs.glob("*.lifeSciConfigRecord"):
-                        shutil.copy2(f, configs_out / f.name)
-                        copied += 1
-                    step_ok(f"Copied {copied} LifeSciConfigRecord files into package")
+                src_configs = find_lifesci_config_dir(lifesci_tmp)
+                if src_configs:
+                    copied = copy_lifesci_dir(src_configs, layout.source_configs)
+                    for path in lifesci_config_paths(layout.source_configs):
+                        source_manifest_items.append(f"LifeSciConfigRecord:{lifesci_member_name(path)}")
+                    step_ok(
+                        f"Retained {copied} LifeSciConfigRecord files under "
+                        f"source/{layout.source_configs.relative_to(layout.root)}"
+                    )
         finally:
             shutil.rmtree(lifesci_tmp, ignore_errors=True)
 
         step_header(8, "Generate Admin Console settings + DbSchema assignments for target profile")
+        copied_to_target = copy_lifesci_dir(layout.source_configs, layout.target_configs)
+        step_detail(f"Copied {copied_to_target} source configs into target/ for transformation")
         lifesci_stats = clone_lifesci_config_records(
-            configs_out,
+            layout.target_configs,
             source.name,
             target_profile_name,
             source.custom,
@@ -929,34 +1145,52 @@ def main() -> int:
             f"{lifesci_stats.get('dbschema_updated', 0)} DbSchema profile assignments"
         )
 
-        manifest_items = ["Profile:" + profile_metadata_api_name(target_profile_name, target_custom)]
-        manifest_items.extend(
-            f"LifeSciConfigRecord:{p.stem}" for p in configs_out.glob("*.lifeSciConfigRecord")
+        prune_stats = prune_configs_for_target_only(
+            layout.target_configs, target_profile_name, target_custom
         )
-        (package_root / "manifest.xml").write_text(build_package_xml(manifest_items), encoding="utf-8")
-        step_detail(f"Wrote deploy manifest with {len(manifest_items)} metadata members")
+        stats["package_prune"] = prune_stats
+        lifesci_stats["package_prune"] = prune_stats
+        step_ok(
+            f"Target package filtered: "
+            f"{prune_stats['kept_admin']} admin + {prune_stats['kept_dbschema']} DbSchema "
+            f"({prune_stats['removed']} source-only configs removed from target/)"
+        )
 
-        write_readme(
-            package_root,
+        target_manifest_items = [
+            "Profile:" + profile_metadata_api_name(target_profile_name, target_custom)
+        ]
+        target_manifest_items.extend(
+            f"LifeSciConfigRecord:{lifesci_member_name(p)}"
+            for p in lifesci_config_paths(layout.target_configs)
+        )
+        (layout.target_root / "manifest.xml").write_text(
+            build_package_xml(target_manifest_items), encoding="utf-8"
+        )
+        step_detail(f"Wrote target/manifest.xml with {len(target_manifest_items)} deploy members")
+
+        write_package_readmes(
+            layout,
             source_org,
             dest_org,
             source.api_name,
             target_profile_name,
             profile_created,
             stats,
+            source_manifest_items,
+            target_manifest_items,
         )
-        step_ok(f"Package ready at: {package_root}")
+        step_ok(f"Run output ready at: {layout.root}")
 
         if args.package_only:
             step_header(9, "Deploy to destination org (skipped — package-only)")
-            step_ok("Package built; deploy skipped (--package-only)")
+            step_ok("Target package built; deploy skipped (--package-only)")
             step_detail(
                 f"Deploy manually: sf project deploy start --source-dir "
-                f"{package_root / 'force-app'} --target-org {dest_org}"
+                f"{layout.target_root / 'force-app'} --target-org {dest_org}"
             )
         else:
             step_header(9, "Deploy package to destination org")
-            deploy_package(package_root, dest_org)
+            deploy_package(layout, dest_org)
             deployed = True
             step_ok(f"Deploy complete to {dest_org}")
             step_detail("Post-deploy: Validate DbSchema → Generate Metadata Cache → assign permission sets → iPad sync")
@@ -970,12 +1204,12 @@ def main() -> int:
             source_analysis=source_analysis,
             lifesci_stats=lifesci_stats,
             profile_counts=profile_counts,
-            package_root=package_root,
+            layout=layout,
             deployed=deployed,
         )
 
-    finally:
-        shutil.rmtree(retrieve_root, ignore_errors=True)
+    except RuntimeError:
+        raise
 
     return 0
 

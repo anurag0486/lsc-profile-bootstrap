@@ -1,7 +1,9 @@
 packages/*
 !packages/.gitkeep
 config/bootstrap.env
+.lsc-work/
 .lsc-retrieve-*
+.sf/
 __pycache__/
 *.pyc
 .DS_Store

@@ -1,113 +1,74 @@
-# LSC Profile Bootstrap — VS Code Project
+# LSC Profile Bootstrap
 
-Copy LSC Admin Console settings, DbSchema, page layouts, apps, and profile config from a **golden profile** to a **new profile** in your dev org.
+Automate LSC profile setup: clone a **golden profile**'s Admin Console settings, DbSchema assignments, page layouts, Lightning record pages, and app assignments into a **new target profile** in a dev org.
+
+Public repo: https://github.com/anurag0486/lsc-profile-bootstrap
 
 ---
 
-## Import this project in VS Code (first time)
+## What it does
 
-### 1. Install prerequisites
+| Copies from golden profile | Does **not** touch |
+|----------------------------|-------------------|
+| Profile (layouts, apps, tabs, record types) | Org-level Admin Console settings |
+| Profile-specific Admin Console settings | Other profiles' admin settings |
+| DbSchema object assignments (adds target profile) | Permission sets (assign manually post-deploy) |
+
+**Deploy safety:** Only metadata in `target/` is deployed. Omitting org-level settings from the package does **not** delete existing settings in the destination org.
+
+---
+
+## Prerequisites
 
 | Tool | Link |
 |------|------|
 | VS Code | https://code.visualstudio.com/ |
-| Salesforce CLI | https://developer.salesforce.com/tools/salesforcecli |
-| Python 3 | https://www.python.org/downloads/ |
+| Salesforce CLI (`sf`) | https://developer.salesforce.com/tools/salesforcecli |
+| Python 3.9+ | https://www.python.org/downloads/ |
 
-### 2. Get the project
+Authenticate orgs once with `sf org login web --alias YOUR_ALIAS`, or let the script open browser login automatically.
+
+---
+
+## Quick start
+
+### Clone and open
 
 ```bash
 git clone https://github.com/anurag0486/lsc-profile-bootstrap.git
+cd lsc-profile-bootstrap
 ```
 
-### 3. Open as a VS Code workspace
+Open `lsc-profile-bootstrap.code-workspace` in VS Code. Install recommended extensions when prompted (**Salesforce Extension Pack**, **Python**).
 
-**Recommended** — double-click or open this file in VS Code:
-
-```
-lsc-profile-bootstrap.code-workspace
-```
-
-Or in VS Code:
-
-1. **File → Open Workspace from File…**
-2. Select `lsc-profile-bootstrap.code-workspace`
-
-VS Code will prompt you to install recommended extensions (**Salesforce Extension Pack**, **Python**). Click **Install**.
-
----
-
-## Project layout
-
-```
-lsc-profile-bootstrap/
-├── lsc-profile-bootstrap.code-workspace   ← open this file in VS Code
-├── lsc_profile_bootstrap.py               ← main script
-├── sfdx-project.json                      ← Salesforce API 67
-├── config/
-│   └── bootstrap.example.env              ← optional reference values
-├── force-app/main/default/                ← deploy output structure
-├── packages/                              ← generated packages land here
-└── .vscode/
-    ├── tasks.json                         ← run script from Command Palette
-    ├── launch.json                        ← debug configuration
-    └── extensions.json                    ← recommended extensions
-```
-
----
-
-## Run from VS Code (no typing commands)
-
-1. Press **Cmd + Shift + P** (Mac) or **Ctrl + Shift + P** (Windows)
-2. Type **Tasks: Run Task**
-3. Pick a task:
-
-| Task | What it does |
-|------|----------------|
-| **LSC: Login to Source Org** | Browser login to golden org |
-| **LSC: Login to Dev Org** | Browser login to dev org |
-| **LSC: List Connected Orgs** | Show `sf org list` |
-| **LSC: List Profile API Names (Source Org)** | Find source profile API name |
-| **LSC: Run Profile Bootstrap (deploy)** | Auto-login both orgs if needed, run script + deploy |
-| **LSC: Run Profile Bootstrap (package only)** | Auto-login, build package only, no deploy |
-
-Tasks will **prompt** for:
-
-- Source org alias (e.g. `GOLDEN_ORG`)
-- Dev org alias (e.g. `MY_DEV_ORG`)
-- Source profile **API name** (e.g. `Custom: FSR POC`)
-- Target profile **Name** (e.g. `Medical Science Liaison`)
-
-**Automatic login:** If either org is not connected, the script opens a browser login window for that org before continuing. You can still use the separate **Login to Source/Dev Org** tasks if you prefer to authenticate ahead of time.
-
-**Step-by-step logs:** Each run prints 9 numbered steps with `→` detail lines and `✓` confirmations so you can verify every action.
-
-**Default build task:** **Cmd + Shift + B** (Mac) or **Ctrl + Shift + B** (Windows) runs **LSC: Run Profile Bootstrap (deploy)**.
-
----
-
-## Run from terminal (alternative)
+### Run from terminal
 
 ```bash
-python3 lsc_profile_bootstrap.py GOLDEN_ORG MY_DEV_ORG "Custom: FSR POC" "Medical Science Liaison"
+python3 lsc_profile_bootstrap.py SOURCE_ORG DEST_ORG "Source Profile API Name" "Target Profile Name"
 ```
 
-Optional instance URLs for first-time browser login:
+**Example:**
 
 ```bash
-python3 lsc_profile_bootstrap.py GOLDEN_ORG MY_DEV_ORG "Custom: FSR POC" "MSL Profile" \
-  --source-instance-url https://golden.my.salesforce.com \
-  --dest-instance-url https://dev.my.salesforce.com
+python3 lsc_profile_bootstrap.py GOLDEN_ORG MY_DEV_ORG "Field Sales Representative" "Medical Science Liaison"
 ```
 
-| # | Parameter | Example |
-|---|-----------|---------|
-| 1 | Source org alias | `GOLDEN_ORG` |
-| 2 | Dev org alias | `MY_DEV_ORG` |
-| 3 | Source profile **API name** | `Custom: FSR POC` |
-| 4 | Target profile **display Name** | `Medical Science Liaison` |
+**Package only (no deploy):**
 
-Find source API names:
+```bash
+python3 lsc_profile_bootstrap.py GOLDEN_ORG MY_DEV_ORG "Custom: FSR POC" "MSL Profile" --package-only
+```
+
+**Optional flags:**
+
+| Flag | Purpose |
+|------|---------|
+| `--package-only` | Build `source/` + `target/` folders without deploying |
+| `--output-dir PATH` | Custom output folder (default: `packages/lsc-bootstrap-TIMESTAMP`) |
+| `--source-instance-url URL` | My Domain URL for source org browser login |
+| `--dest-instance-url URL` | My Domain URL for destination org browser login |
+
+Find source profile API names:
 
 ```bash
 sf org list metadata --metadata-type Profile --target-org GOLDEN_ORG
@@ -115,27 +76,118 @@ sf org list metadata --metadata-type Profile --target-org GOLDEN_ORG
 
 ---
 
-## After the script completes
+## CLI parameters
 
-The terminal prints an **EXECUTION SUMMARY** including:
+| # | Parameter | Example | Notes |
+|---|-----------|---------|-------|
+| 1 | Source org alias | `GOLDEN_ORG` | Golden profile org |
+| 2 | Destination org alias | `MY_DEV_ORG` | Dev org |
+| 3 | Source profile **API name** | `Custom: FSR POC` | Metadata fullName, not display label |
+| 4 | Target profile **display Name** | `Medical Science Liaison` | Setup label for new/existing profile |
 
-- Admin Console settings retrieved from the source org
-- **Admin Console settings generated** for the target profile (count + file list)
+---
+
+## Run from VS Code
+
+1. **Cmd/Ctrl + Shift + P** → **Tasks: Run Task**
+2. Choose a task:
+
+| Task | What it does |
+|------|----------------|
+| **LSC: Run Profile Bootstrap (deploy)** | Auto-login, build package, deploy to dev org |
+| **LSC: Run Profile Bootstrap (package only)** | Auto-login, build package only |
+| **LSC: List Profile API Names (Source Org)** | Find golden profile API name |
+| **LSC: Login to Source Org** / **Login to Dev Org** | Manual browser login |
+| **LSC: List Connected Orgs** | Show `sf org list` |
+
+**Default build:** **Cmd/Ctrl + Shift + B** runs deploy task.
+
+Each run prints **9 numbered steps** with `→` detail lines and `✓` confirmations, plus an **EXECUTION SUMMARY** at the end.
+
+---
+
+## Output folder structure
+
+Every run creates a timestamped folder under `packages/`:
+
+```
+packages/lsc-bootstrap-<timestamp>/
+├── README.md                          ← run summary
+├── source/                            ← retrieved from golden org (retained, NOT deployed)
+│   ├── README.md
+│   ├── manifest-retrieved.xml         ← what was retrieved from source
+│   └── force-app/main/default/
+│       ├── profiles/                  ← golden profile as retrieved
+│       └── lifeSciConfigRecords/      ← source-profile admin + DbSchema as retrieved
+└── target/                            ← deploy THIS folder only
+    ├── README-DEPLOY.md
+    ├── manifest.xml                   ← deploy manifest (target profile only)
+    ├── sfdx-project.json
+    └── force-app/main/default/
+        ├── profiles/                  ← target profile
+        └── lifeSciConfigRecords/      ← target-profile admin + DbSchema only
+```
+
+### Deploy manually
+
+```bash
+sf project deploy start \
+  --source-dir packages/lsc-bootstrap-<timestamp>/target/force-app \
+  --target-org MY_DEV_ORG \
+  --wait 30
+```
+
+---
+
+## Execution summary (example)
+
+At the end of each run the script prints:
+
+- Source-profile Admin Console settings found in golden org
+- Admin Console settings **generated** for target profile
 - DbSchema profile assignments added
-- Profile layout / app / tab assignment counts
+- Profile layout / app / tab / record-type counts
+- Count of unrelated configs **excluded** from deploy
 
-In your **dev org**:
+---
+
+## Post-deploy checklist
+
+In the **destination org**:
 
 1. Admin Console → Mobile → Object Metadata Cache → **Validate**
 2. **Generate Metadata Cache** for the new profile
 3. Assign **LSC permission sets** to test users
 4. iPad sync smoke test
 
-Output package folder:
+---
+
+## Project layout
 
 ```
-packages/lsc-bootstrap-<timestamp>/
+lsc-profile-bootstrap/
+├── lsc-profile-bootstrap.code-workspace
+├── lsc_profile_bootstrap.py           ← main script
+├── sfdx-project.json                  ← Salesforce API 67
+├── config/
+│   └── bootstrap.example.env          ← example values only (no secrets)
+├── packages/                          ← generated runs (gitignored)
+└── .vscode/                           ← tasks, launch, extensions
 ```
+
+---
+
+## Security / credentials
+
+**Never commit org credentials.** The following are gitignored:
+
+- `packages/` — generated run output (may contain org-specific metadata)
+- `.lsc-work/` — temporary retrieve folders
+- `.sf/` — Salesforce CLI org auth cache
+- `config/bootstrap.env` — local env overrides
+- `.env`
+
+Use `sf org login web` for authentication; credentials stay in your local Salesforce CLI keychain.
 
 ---
 
@@ -143,18 +195,21 @@ packages/lsc-bootstrap-<timestamp>/
 
 | Error | Fix |
 |-------|-----|
-| `source profile not found in sourceorg` | Use exact API name from **List Profile API Names** task |
-| Org not authenticated | Script auto-opens browser login; or run **Login to Source/Dev Org** tasks |
-| `sf` not found | Install Salesforce CLI, restart VS Code |
-| Extension recommendations | Accept when opening workspace |
+| `source profile not found in sourceorg` | Use exact API name from `sf org list metadata --metadata-type Profile` |
+| Org not authenticated | Script auto-opens browser login, or run **Login to Source/Dev Org** task |
+| `sf` not found | Install Salesforce CLI, restart terminal/VS Code |
+| `OutputDirOutsideProjectError` | Run script from project root (fixed in current version) |
 
 ---
 
-## Share with your team
+## How it works (9 steps)
 
-1. Push this folder to GitHub
-2. Teammates: **clone → open `lsc-profile-bootstrap.code-workspace`**
-3. Install recommended extensions when prompted
-4. Run tasks from **Cmd/Ctrl + Shift + P → Tasks: Run Task**
-
-Ask your team lead for golden org alias, profile API name, and permission sets.
+1. Authenticate source org
+2. Authenticate destination org
+3. Resolve source profile by API name
+4. Check if target profile exists in destination
+5. Retrieve source profile → `source/profiles/`
+6. Build target profile → `target/profiles/`
+7. Retrieve source-profile admin + DbSchema → `source/lifeSciConfigRecords/`
+8. Clone admin settings + add DbSchema assignments → `target/lifeSciConfigRecords/`
+9. Deploy `target/force-app` (skipped with `--package-only`)
