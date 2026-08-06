@@ -17,7 +17,7 @@ Copy LSC Admin Console settings, DbSchema, page layouts, apps, and profile confi
 ### 2. Get the project
 
 ```bash
-git clone <YOUR-REPO-URL>
+git clone https://github.com/anurag0486/lsc-profile-bootstrap.git
 ```
 
 ### 3. Open as a VS Code workspace
